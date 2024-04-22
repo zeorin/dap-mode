@@ -117,7 +117,7 @@ also `dap--make-terminal-buffer'."
           (const :tag "asnyc-shell" :value dap-internal-terminal-shell)
           (function :tag "Custom function")))
 
-(defcustom dap-output-buffer-filter '("stdout" "stderr")
+(defcustom dap-output-buffer-filter '("stdout" "stderr" "console")
   "If non-nil, a list of output types to display in the debug output buffer."
   :group 'dap-mode
   :type 'list)
@@ -226,12 +226,12 @@ request on hitting a breakpoint. 0 means to return all frames."
   "Windows to auto show on debugging when in dap-ui-auto-configure-mode."
   :group 'dap-mode
   :type '(set (const :tag "Show sessions popup window when debugging" sessions)
-              (const :tag "Show locals popup window when debugging" locals)
-              (const :tag "Show breakpoints popup window when debugging" breakpoints)
-              (const :tag "Show expressions popup window when debugging" expressions)
-              (const :tag "Show REPL popup window when debugging" repl)
-              (const :tag "Enable `dap-ui-controls-mode` with controls to manage the debug session when debugging" controls)
-              (const :tag "Enable `dap-tooltip-mode` that enables mouse hover support when debugging" tooltip)))
+          (const :tag "Show locals popup window when debugging" locals)
+          (const :tag "Show breakpoints popup window when debugging" breakpoints)
+          (const :tag "Show expressions popup window when debugging" expressions)
+          (const :tag "Show REPL popup window when debugging" repl)
+          (const :tag "Enable `dap-ui-controls-mode` with controls to manage the debug session when debugging" controls)
+          (const :tag "Enable `dap-tooltip-mode` that enables mouse hover support when debugging" tooltip)))
 
 (defconst dap-features->windows
   '((sessions . (dap-ui-sessions . dap-ui--sessions-buffer))
@@ -947,7 +947,11 @@ PARAMS are the event params.")
                              (formatted-output (if-let ((output-filter-fn (-> debug-session
                                                                               (dap--debug-session-launch-args)
                                                                               (plist-get :output-filter-function))))
-                                                   (funcall output-filter-fn formatted-output)
+						   (progn
+                                                     ;; Test # of params.  Consider deprecating 1 param function.
+                                                     (if (= 1 (cdr (func-arity output-filter-fn)))
+                                                         (funcall output-filter-fn formatted-output)
+                                                       (funcall output-filter-fn debug-session event)))
                                                  formatted-output)))
                   (when (or (not dap-output-buffer-filter) (member (gethash "category" body)
                                                                    dap-output-buffer-filter))
@@ -1118,9 +1122,16 @@ terminal configured (probably xterm)."
                                                             (gethash "command" parsed-msg)))
                                     (message "Unable to find handler for %s." (pp parsed-msg))))
                       ("request"
+                       ;; These are "Reverse Requests", or requests from DAP server to client
                        (pcase (gethash "command" parsed-msg)
-                         ("startDebugging" (dap--start-debugging debug-session parsed-msg))
-                         ("runInTerminal" (dap--start-process debug-session parsed-msg)))))
+                         ("runInTerminal"
+                          (dap--start-process debug-session parsed-msg))
+                         (_
+                          (setf (dap--debug-session-metadata debug-session) parsed-msg)
+                          ;; Consider moving this hook out to also include runInTerminal reverse requests
+                          (run-hook-with-args 'dap-executed-hook
+                                              debug-session
+                                              (gethash "command" parsed-msg))))))
                   (quit))))
             (dap--parser-read parser msg)))))
 
@@ -1164,8 +1175,8 @@ etc...."
   "Create initialize message.
 ADAPTER-ID the id of the adapter."
   (list :command "initialize"
-        :arguments (list :clientID "vscode"
-                         :clientName "Visual Studio Code"
+        :arguments (list :clientID "emacs"
+                         :clientName "emacs DAP client"
                          :adapterID adapter-id
                          :pathFormat "path"
                          :linesStartAt1 t
@@ -1173,6 +1184,8 @@ ADAPTER-ID the id of the adapter."
                          :supportsVariableType t
                          :supportsVariablePaging t
                          :supportsRunInTerminalRequest t
+			 :supportsStartDebuggingRequest t
+			 :supportsTerminateDebuggee t
                          :locale "en-us")
         :type "request"))
 
@@ -1226,9 +1239,9 @@ ADAPTER-ID the id of the adapter."
            (message "Failed to connect to %s:%s with error message %s"
                     host
                     port
-                    (error-message-string err))
-           (sit-for dap-connect-retry-interval)
-           (setq retries (1+ retries))))))
+                    (error-message-string err)))
+         (sleep-for dap-connect-retry-interval)
+         (setq retries (1+ retries)))))
     (or result (error "Failed to connect to port %s" port))))
 
 (defun dap--create-session (launch-args)
@@ -1890,8 +1903,8 @@ be used to compile the project, spin up docker, ...."
         (dap-debug-run-task `(:cwd ,(or (plist-get launch-args :dap-compilation-dir)
                                         (lsp-workspace-root)
                                         default-directory)
-                                   :command ,dap-compilation
-                                   :label ,(truncate-string-to-width dap-compilation 20)) cb)
+                              :command ,dap-compilation
+                              :label ,(truncate-string-to-width dap-compilation 20)) cb)
       (-if-let ((&plist :preLaunchTask) launch-args)
           (let* ((task (dap-tasks-get-configuration-by-label preLaunchTask))
                  (tasks (dap-tasks-configuration-get-depends task)))
